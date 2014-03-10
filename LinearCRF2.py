@@ -24,6 +24,7 @@ import datetime
 import ctypes
 import multiprocessing
 from multiprocessing import Process, Queue
+import sys
 
 _gradient = None  #  global variable used to store the gradient calculated in Liklihood function.
 
@@ -133,19 +134,21 @@ def expandOBX(texts,seqid,locid,tp):  # expend the observation at locid for sequ
     for li in tp[1::]:
         row=locid+int(li[0]); col=int(li[1])
         if row>=0 and row<len(texts[seqid]):
-            if col>=0 and len(texts[seqid][row]):
+            if col>=0 and col<len(texts[seqid][row]):
                 strt+= ":" + texts[seqid][row][col]
     #print strt
     return strt       
 
     
 def processFeatures(tplist,texts,seqnum,K):
-    uobxs =  dict(); bobxs=dict()
+    uobxs =  dict(); bobxs=dict() ; 
     ufnum=0;bfnum=0
-    for tp in tplist:  # for each template line
+    for ti,tp in enumerate(tplist):  # for each template line
         for sid in range(seqnum):  # for each traning sequence.
             for lid in range(len(texts[sid])):
                 obx=expandOBX(texts,sid,lid,tp)
+                #skey = str(ti)+":"+str(sid)+":"+str(lid)
+                #oball[skey]=obx
                 if obx[0]=="B":
                     if bobxs.has_key(obx)==False:
                         bobxs[obx]=bfnum
@@ -165,8 +168,10 @@ def calObservexOn(tplist,texts,uobxs,bobxs,seqnum):
         sequon=[];seqbon=[]
         for lid in range(len(texts[sid])):
             luon=[];lbon=[]
-            for tp in tplist:  # for each template line
+            for ti,tp in enumerate(tplist):  # for each template line
                 obx=expandOBX(texts,sid,lid,tp)
+                #skey = str(ti)+":"+str(sid)+":"+str(lid)
+                #obx=oball[skey]
                 if tp[0][0]=="B":
                     fid=bobxs.get(obx)
                     #print fid
@@ -663,28 +668,48 @@ def train(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
     
     uobxs,bobxs,ufnum,bfnum=processFeatures(tplist,texts,seqnum,K)
     fnum=ufnum+bfnum
-    #print fnum
-    
-    uon,bon = calObservexOn(tplist,texts,uobxs,bobxs,seqnum)
-    
-    y0=0
-    fss=calFSS(texts,oys,uon,bon,ufnum,bfnum,seqnum,K,y0)
     print "Linear CRF in Python.. ver 0.1 "
     print "B features:",bfnum,"U features:",ufnum, "total num:",fnum
     print "training sequence number:",seqnum
+    print "start to calculate ON feature.  ", time.time() - start_time, "seconds. \n "
+    uon,bon = calObservexOn(tplist,texts,uobxs,bobxs,seqnum)
 
+    #print  "ubon size:", sys.getsizeof(uon)
+    #print  "uobxs size:", sys.getsizeof(uobxs)
+    #print  "texts size:", sys.getsizeof(texts)
+    print "start to calculate data distribuition. ", time.time() - start_time, "seconds. \n "    
+#    del uobxs
+#    del bobxs
+    
+    y0=0
+    fss=calFSS(texts,oys,uon,bon,ufnum,bfnum,seqnum,K,y0)
+    del texts    
+    del oys
+    
+#    import cPickle as pickle
+#    with open("dump", 'wb') as f:
+#        pickle.dump([uon], f)
+        
+    print "start to learn distribuition. ", time.time() - start_time, "seconds. \n " 
+
+    #return
+    
     from scipy import optimize
     if mp==1:  # using multi processing
         theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
+        print "theta OK", time.time() - start_time, "seconds. \n "
         #theta = numpy.ctypeslib.as_array(theta.get_obj())
         #theta = theta.reshape(ufnum+bfnum)
         manager=multiprocessing.Manager()
         ns=manager.Namespace()
         ns.uon=uon
+        print "uon OK", time.time() - start_time, "seconds. \n "
         ns.bon=bon
+        print "bon OK" , time.time() - start_time, "seconds. \n "
         alens = multiprocessing.Array('i', seqnum)
         for i in range(len(seqlens)):
             alens[i]=seqlens[i]
+        print "alens OK", time.time() - start_time, "seconds. \n "
         likeli = lambda x:-likelihood_mp(alens,fss,x,seqnum,K,ufnum,bfnum,regtype,sigma,ns)
     else:
         theta=random_param(ufnum,bfnum)
@@ -703,10 +728,11 @@ def main():
     #checkCrfDev("trainexample2.txt","template.txt")
     #checkCrfDev("trainsimple.data","templatesimple.txt")
     #train("train1.txt","template.txt","model",mp=0)
-    train("train1.txt","template.txt","model",mp=1)
+    #train("train1.txt","template.txt","model",mp=1)
+    #train("datas\\4.msr_training.data","templatechunk","model")
     #rain("train2.txt","template.txt","model",mp=1)
-    #train("train.txt","template.txt","model")
-    #train("trainsimple.data","templatesimple.txt","model")
+    #train("datas\\train.txt","templatechunk","model")
+    train("trainsimple.data","templatesimple.txt","model")
     #train("tr1.utf8.txt","templatesimple.txt","model")
     
     #crfpredict("train2.txt","model","res.txt")
