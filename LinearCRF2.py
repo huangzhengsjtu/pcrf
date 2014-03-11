@@ -185,6 +185,69 @@ def calObservexOn(tplist,texts,uobxs,bobxs,seqnum):
         uon.append(sequon);bon.append(seqbon)
     return uon,bon
 
+def calObservexOnLoc(uon,bon,seqnum,mp):
+    '''speed up the feature calculation (Mulitprocessing)
+      calculate the on feature list and location ''' 
+    ulen=0 ; loclen=0
+    for a in uon:
+        loclen+=len(a)
+        for b in a:
+            ulen+=len(b)
+    #ulen = sum[(len(b)) for b in a for a in uon]
+    if sys.platform=="win32" and mp==1:   # windows system need shared memory to do multiprocessing
+        uonarr=multiprocessing.Array('i', ulen)
+        uonseqsta=multiprocessing.Array('i', seqnum)
+        uonlocsta=multiprocessing.Array('i', loclen)
+        uonlocend=multiprocessing.Array('i', loclen)     
+    else:
+        uonarr=numpy.zeros((ulen),dtype=numpy.int)
+        uonseqsta=numpy.zeros((seqnum),dtype=numpy.int)
+        uonlocsta=numpy.zeros((loclen),dtype=numpy.int)
+        uonlocend=numpy.zeros((loclen),dtype=numpy.int)
+        
+    uid=0 ; seqi = 0 ; loci=0
+    for seq in uon:  # for each traning sequence.
+        uonseqsta[seqi]=loci
+        for loco in seq:
+            uonlocsta[loci]=uid
+            for aon in loco:
+                uonarr[uid]=aon
+                uid+=1
+            uonlocend[loci]=uid
+            loci+=1
+        seqi+=1
+        
+    blen=0 ; loclen=0
+    for a in bon:
+        loclen+=len(a)
+        for b in a:
+            blen+=len(b)
+    #ulen = sum[(len(b)) for b in a for a in uon]
+            
+    if sys.platform=="win32" and mp==1:   # windows system need shared memory to do multiprocessing
+        bonarr=multiprocessing.Array('i', ulen)
+        bonseqsta=multiprocessing.Array('i', seqnum)
+        bonlocsta=multiprocessing.Array('i', loclen)
+        bonlocend=multiprocessing.Array('i', loclen)     
+    else:
+        bonarr=numpy.zeros((ulen),dtype=numpy.int)
+        bonseqsta=numpy.zeros((seqnum),dtype=numpy.int)
+        bonlocsta=numpy.zeros((loclen),dtype=numpy.int)
+        bonlocend=numpy.zeros((loclen),dtype=numpy.int)
+        
+    bid=0 ; seqi = 0 ; loci=0
+    for seq in bon:  # for each traning sequence.
+        bonseqsta[seqi]=loci
+        for loco in seq:
+            bonlocsta[loci]=bid
+            for aon in loco:
+                bonarr[bid]=aon
+                bid+=1
+            bonlocend[loci]=bid
+            loci+=1
+        seqi+=1
+    #print len(uonlocsta)
+    return uonarr,uonseqsta,uonlocsta,uonlocend, bonarr,bonseqsta,bonlocsta,bonlocend
 
 def calFSS(texts,oys,uon,bon,ufnum,bfnum,seqnum,K,y0):
     fss=numpy.zeros((ufnum+bfnum))
@@ -259,6 +322,26 @@ def logMarray(seqlen,auon,abon,K, thetau,thetab):
     #print "mlist:",mlist
     return mlist      
 
+def logM_sa(seqlen,seqid,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,K, thetau,thetab):
+    ''' logMlist (n, K, K ) --> (sequence length, Yt, Yt-1)'''
+    mlist=[]
+    iloc = uonseqsta[seqid]
+    ilocb = bonseqsta[seqid]
+    for li in range(seqlen):
+        fv = numpy.zeros((K,K))
+        for i in range(uonlocsta[iloc+li],uonlocend[iloc+li]):
+            ao=uonarr[i]
+            fv+=thetau[ao:ao+K][:,numpy.newaxis]
+        for i in range(bonlocsta[ilocb+li],bonlocend[ilocb+li]):
+            ao=bonarr[i]
+            fv+=thetab[ao:ao+K*K].reshape((K,K))
+        mlist.append(fv)
+    
+    for i in range(0,K):  # set the energe function for ~y(0) to be -inf.
+        mlist[0][i][1:]= - float("inf")
+    #print "mlist:",mlist
+    return mlist      
 
 '''numpy version of logM, it is even slower than list version'''
 #def logMarray(seqlen,seqid,uon,bon,K, thetau,thetab):  
@@ -351,6 +434,81 @@ def likelihoodthread(seqlens,theta,seqnum,K,ufnum,bfnum,starti,endi,que1,que2,ns
     que1.put(likelihood)
     que2.put(grad)
         
+        
+        
+        
+#def likelihoodthread(seqlens,uon,bon,theta,seqnum,K,ufnum,bfnum,starti,endi,que1,que2):
+def likelihoodthread_simple(seqlens,uon,bon,theta,K,ufnum,bfnum,que1,que2):
+    grad = numpy.zeros(ufnum+bfnum)  
+    likelihood = 0
+    gradb=grad[0:bfnum]
+    gradu=grad[bfnum:]
+    thetab=theta[0:bfnum]
+    thetau=theta[bfnum:]
+    #likelihood = numpy.dot(fss,theta)
+    for si in range(len(seqlens)):
+        #logMlist = logMarray(seqlens[si],si,uon,bon,K,thetau,thetab)
+        logMlist = logMarray(seqlens[si],uon[si],bon[si],K,thetau,thetab)
+        logalphas = logAlphas(logMlist)
+        logbetas = logBetas(logMlist)
+        logZ = logsumexp(logalphas[-1])
+        likelihood -= logZ
+        expect = numpy.zeros((K,K))
+        for i in range(len(logMlist)):
+            if i == 0:
+                expect = numpy.exp(logMlist[0] + logbetas[i][:,numpy.newaxis] - logZ)
+            elif i < len(logMlist) :
+                expect = numpy.exp(logMlist[i] + logalphas[i-1][numpy.newaxis,: ] + logbetas[i][:,numpy.newaxis] - logZ)
+            #print "expect t:",i, "expect: ", expect
+            p_yi=numpy.sum(expect,axis=1)
+            # minus the parameter distribuition
+            for ao in uon[si][i]:
+                gradu[ao:ao+K] -= p_yi
+            for ao in bon[si][i]:
+                gradb[ao:ao+K*K] -= expect.reshape((K*K))
+    que1.put(likelihood)
+    que2.put(grad)        
+
+
+def likelihoodthread_sa(seqlens,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,theta,starti,endi,seqnum,K,ufnum,bfnum,que1,que2):
+    grad = numpy.zeros(ufnum+bfnum)  
+    likelihood = 0
+    gradb=grad[0:bfnum]
+    gradu=grad[bfnum:]
+    thetab=theta[0:bfnum]
+    thetau=theta[bfnum:]
+    #likelihood = numpy.dot(fss,theta)
+    for si in range(starti,endi):
+        #logMlist = logMarray(seqlens[si],si,uon,bon,K,thetau,thetab)
+        logMlist = logM_sa(seqlens[si],si,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,K,thetau,thetab)
+        logalphas = logAlphas(logMlist)
+        logbetas = logBetas(logMlist)
+        logZ = logsumexp(logalphas[-1])
+        likelihood -= logZ
+        expect = numpy.zeros((K,K))
+        for i in range(len(logMlist)):
+            if i == 0:
+                expect = numpy.exp(logMlist[0] + logbetas[i][:,numpy.newaxis] - logZ)
+            elif i < len(logMlist) :
+                expect = numpy.exp(logMlist[i] + logalphas[i-1][numpy.newaxis,: ] + logbetas[i][:,numpy.newaxis] - logZ)
+            #print "expect t:",i, "expect: ", expect
+            p_yi=numpy.sum(expect,axis=1)
+            # minus the parameter distribuition
+            iloc = uonseqsta[si]
+            for it in range(uonlocsta[iloc+i],uonlocend[iloc+i]):            
+                ao=uonarr[it]
+                gradu[ao:ao+K] -= p_yi
+                
+            iloc = bonseqsta[si]    
+            for it in range(bonlocsta[iloc+i],bonlocend[iloc+i]):            
+                ao=bonarr[it]
+                gradb[ao:ao+K*K] -= expect.reshape((K*K))
+                
+    que1.put(likelihood)
+    que2.put(grad)        
+
 
 def likelihood_multithread_O(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum):   # multithread version of likelihood
     '''conditional log likelihood log p(Y|X)'''
@@ -419,6 +577,123 @@ def likelihood_mp(seqlens,fss,theta,seqnum,K,ufnum,bfnum,regtype,sigma,ns):
         grad += que2.get()
     while subprocesses:
         subprocesses.pop().join()
+    grad -= regularity_deriv(theta,regtype,sigma)
+    _gradient = grad
+    return likelihood - regularity(theta,regtype,sigma)
+
+
+'''simply use windows multiprocess, pickle everything'''
+def likelihood_mp_simple(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma):
+    global _gradient
+    grad = numpy.array(fss,copy=True)  # data distribuition
+    likelihood = numpy.dot(fss,theta)
+    que1 = Queue() # for the likihood output
+    que2 = Queue() # for the gradient output
+    np = 0
+    subprocesses = []
+    corenum=multiprocessing.cpu_count()
+    #corenum=1
+    if corenum>1:
+        chunk=seqnum/corenum+1
+    else:
+        chunk=seqnum
+    starti=0
+    while starti < (seqnum):
+        endi=starti+chunk
+        if endi>seqnum:
+            endi=seqnum    
+        p = Process(target=likelihoodthread_simple, 
+            args=(seqlens[starti:endi],uon[starti:endi],bon[starti:endi],theta,K,ufnum,bfnum,que1,que2))
+        p.start()
+        np+=1
+        #print 'delegated %s:%s to subprocess %s' % (starti, endi, np)
+        subprocesses.append(p)
+        starti += chunk
+    for i in range(np):
+        likelihood += que1.get()
+    for i in range(np):
+        grad += que2.get()
+    while subprocesses:
+        subprocesses.pop().join()
+    grad -= regularity_deriv(theta,regtype,sigma)
+    _gradient = grad
+    return likelihood - regularity(theta,regtype,sigma)
+
+
+'''using shared array to do the multiprocessing in windows'''
+def likelihood_mp_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,theta,seqnum,K,ufnum,bfnum,regtype,sigma):
+    global _gradient
+    grad = numpy.array(fss,copy=True)  # data distribuition
+    likelihood = numpy.dot(fss,theta)
+    que1 = Queue() # for the likihood output
+    que2 = Queue() # for the gradient output
+    np = 0
+    subprocesses = []
+    corenum=multiprocessing.cpu_count()
+    #corenum=1
+    if corenum>1:
+        chunk=seqnum/corenum+1
+    else:
+        chunk=seqnum
+    starti=0
+    while starti < (seqnum):
+        endi=starti+chunk
+        if endi>seqnum:
+            endi=seqnum    
+        p = Process(target=likelihoodthread_sa, 
+            args=(seqlens,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,theta,starti,endi,seqnum,K,ufnum,bfnum,que1,que2))
+        p.start()
+        np+=1
+        #print 'delegated %s:%s to subprocess %s' % (starti, endi, np)
+        subprocesses.append(p)
+        starti += chunk
+    for i in range(np):
+        likelihood += que1.get()
+    for i in range(np):
+        grad += que2.get()
+    while subprocesses:
+        subprocesses.pop().join()
+    grad -= regularity_deriv(theta,regtype,sigma)
+    _gradient = grad
+    return likelihood - regularity(theta,regtype,sigma)
+
+
+def likelihood_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,theta,seqnum,K,ufnum,bfnum,regtype,sigma):
+    global _gradient
+    grad = numpy.array(fss,copy=True)  # data distribuition
+    gradb=grad[0:bfnum]
+    gradu=grad[bfnum:]
+    thetab=theta[0:bfnum]
+    thetau=theta[bfnum:]
+    likelihood = numpy.dot(fss,theta)
+    for si in range(seqnum):
+        logMlist = logM_sa(seqlens[si],si,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,K,thetau,thetab)
+        logalphas = logAlphas(logMlist)
+        logbetas = logBetas(logMlist)
+        logZ = logsumexp(logalphas[-1])
+        likelihood -= logZ
+        expect = numpy.zeros((K,K))
+        for i in range(len(logMlist)):
+            if i == 0:
+                expect = numpy.exp(logMlist[0] + logbetas[i][:,numpy.newaxis] - logZ)
+            elif i < len(logMlist) :
+                expect = numpy.exp(logMlist[i] + logalphas[i-1][numpy.newaxis,: ] + logbetas[i][:,numpy.newaxis] - logZ)
+            #print "expect t:",i, "expect: ", expect
+            p_yi=numpy.sum(expect,axis=1)
+            # minus the parameter distribuition
+            iloc = uonseqsta[si]
+            for it in range(uonlocsta[iloc+i],uonlocend[iloc+i]):            
+                ao=uonarr[it]
+                gradu[ao:ao+K] -= p_yi
+                
+            iloc = bonseqsta[si]    
+            for it in range(bonlocsta[iloc+i],bonlocend[iloc+i]):            
+                ao=bonarr[it]
+                gradb[ao:ao+K*K] -= expect.reshape((K*K))
     grad -= regularity_deriv(theta,regtype,sigma)
     _gradient = grad
     return likelihood - regularity(theta,regtype,sigma)
@@ -518,29 +793,86 @@ def checkCrfDev(datafile,tpltfile):
     print "B features:",bfnum,"U features:",ufnum, "total num:",fnum
     print "training sequence number:",seqnum
 
-    #theta=random_param(ufnum,bfnum)
-    theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
-    theta = numpy.ctypeslib.as_array(theta.get_obj())
-    theta = theta.reshape(ufnum+bfnum)
-    manager=multiprocessing.Manager()
-    ns=manager.Namespace()
-    ns.uon=uon
-    ns.bon=bon
+    theta=random_param(ufnum,bfnum)
+    #theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
+    #theta = numpy.ctypeslib.as_array(theta.get_obj())
+    #theta = theta.reshape(ufnum+bfnum)
+    #manager=multiprocessing.Manager()
+    #ns=manager.Namespace()
+    #ns.uon=uon
+    #ns.bon=bon
     #ns.theta=theta
     #assert ns.theta is theta
     delta=0.0001
     for i in range(fnum):
-        #ta=likelihood_mp(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
-        ta=likelihood_mp(seqlens,fss,theta,seqnum,K,ufnum,bfnum,regtype,sigma,ns)
+        ta=likelihood_mp_simple(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        #ta=likelihood(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        #ta=likelihood_mp(seqlens,fss,theta,seqnum,K,ufnum,bfnum,regtype,sigma,ns)
         dev=gradient_likelihood(theta)
         #dev=gradient_likelihood_standalone(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
         #dev = grad
         theta[i]=theta[i]+delta
         #tb=likelihood(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
-        tb=likelihood_mp(seqlens,fss,theta,seqnum,K,ufnum,bfnum,regtype,sigma, ns)
+        tb=likelihood_mp_simple(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
         devest=(tb-ta)/delta
         print "dev:",dev[i],"dev numeric~:",devest, str(datetime.datetime.now())[10:19]
         theta[i]=theta[i]-delta  # reverse to original    
+
+
+def checkCrfDev_sa(datafile,tpltfile,mp=0):
+    '''Check if the Derivative calculation is correct.
+    Don't call this function if your model has millions of features. 
+    Otherwise it will run forever...      '''
+    if not os.path.isfile(tpltfile):
+        print "Can't find the template file!"
+        return -1
+    tplist=readTemplate(tpltfile)    
+    
+    if not os.path.isfile(datafile):
+        print "Data file doesn't exist!"
+        return -1
+    texts,seqlens,oys,seqnum,K,obydic,y2label=readData(datafile)
+    
+    uobxs,bobxs,ufnum,bfnum=processFeatures(tplist,texts,seqnum,K)
+    fnum=ufnum+bfnum
+   
+    uon,bon = calObservexOn(tplist,texts,uobxs,bobxs,seqnum)
+    uonarr,uonseqsta,uonlocsta,uonlocend,bonarr,bonseqsta,bonlocsta,bonlocend = calObservexOnLoc(uon,bon,seqnum,mp)
+    
+    y0=0
+    regtype=2 ;  sigma=1.0
+    fss=calFSS(texts,oys,uon,bon,ufnum,bfnum,seqnum,K,y0)
+    print "Linear CRF in Python.. ver 0.1 "
+    print "B features:",bfnum,"U features:",ufnum, "total num:",fnum
+    print "training sequence number:",seqnum
+
+    if sys.platform=="win32" and mp==1:
+        theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
+        theta = numpy.ctypeslib.as_array(theta.get_obj())
+        theta = theta.reshape(ufnum+bfnum)
+        
+        #theta=random_param(ufnum,bfnum)
+    else:
+        theta=random_param(ufnum,bfnum)
+    #theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
+    #theta = numpy.ctypeslib.as_array(theta.get_obj())
+    #theta = theta.reshape(ufnum+bfnum)
+    #assert ns.theta is theta
+    delta=0.0001
+    for i in range(fnum):
+        ta=likelihood_mp_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                      bonarr,bonseqsta,bonlocsta,bonlocend,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        dev=gradient_likelihood(theta)
+        #dev=gradient_likelihood_standalone(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        #dev = grad
+        theta[i]=theta[i]+delta
+        #tb=likelihood(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        tb=likelihood_mp_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                      bonarr,bonseqsta,bonlocsta,bonlocend,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        devest=(tb-ta)/delta
+        print "dev:",dev[i],"dev numeric~:",devest, str(datetime.datetime.now())[10:19]
+        theta[i]=theta[i]-delta  # reverse to original    
+
 
 def saveModel(bfnum,ufnum,tlist,obydic,uobxs,bobxs,theta,modelfile):
     import cPickle as pickle
@@ -650,8 +982,77 @@ def crfpredict(datafile,modelfile,resfile=""):
     outputFile(texts,oys,maxys,y2label,resfile)
     print "Test finished in ", time.time() - start_time, "seconds. \n "
 
-
 def train(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
+    import time 
+    import cPickle as pickle
+
+    start_time = time.time()
+    if not os.path.isfile(tpltfile):
+        print "Can't find the template file!"
+        return -1
+    tplist=readTemplate(tpltfile)    
+    #print tplist
+    if not os.path.isfile(datafile):
+        print "Data file doesn't exist!"
+        return -1
+    texts,seqlens,oys,seqnum,K,obydic,y2label=readData(datafile)
+    #print seqlens 
+    
+    uobxs,bobxs,ufnum,bfnum=processFeatures(tplist,texts,seqnum,K)
+    fnum=ufnum+bfnum
+    print "Linear CRF in Python.. ver 0.1 "
+    print "B features:",bfnum,"U features:",ufnum, "total num:",fnum
+    print "training sequence number:",seqnum
+    print "start to calculate ON feature.  elapsed time:", time.time() - start_time, "seconds. \n "
+    uon,bon = calObservexOn(tplist,texts,uobxs,bobxs,seqnum)
+    with open("ubobx", 'wb') as f:
+        pickle.dump([uobxs,bobxs], f)
+    del uobxs
+    del bobxs
+    
+    print "start to calculate data distribuition. elapsed time:", time.time() - start_time, "seconds. \n "    
+    y0=0
+    fss=calFSS(texts,oys,uon,bon,ufnum,bfnum,seqnum,K,y0)
+    del texts    
+    del oys
+
+    print "start to translate ON Feature list to Array.  elapsed time:", time.time() - start_time, "seconds. \n "
+    uonarr,uonseqsta,uonlocsta,uonlocend,bonarr,bonseqsta,bonlocsta,bonlocend = calObservexOnLoc(uon,bon,seqnum,mp)
+    #print  "ubon size:", sys.getsizeof(uon)
+    #print  "uobxs size:", sys.getsizeof(uobxs)
+    #print  "texts size:", sys.getsizeof(texts)
+    del uon
+    del bon
+		
+    print "start to learn distribuition. elapsed time:", time.time() - start_time, "seconds. \n " 
+
+    #return
+    
+    from scipy import optimize
+    if sys.platform=="win32" and mp==1:  # using shared memory
+        theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
+        print "allocate theta OK. elapsed time:", time.time() - start_time, "seconds. \n "
+        theta = numpy.ctypeslib.as_array(theta.get_obj())
+        theta = theta.reshape(ufnum+bfnum)
+    else:
+        theta=random_param(ufnum,bfnum)
+    
+    if mp==1:  # using multi processing
+        likeli = lambda x:-likelihood_mp_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                      bonarr,bonseqsta,bonlocsta,bonlocend,x,seqnum,K,ufnum,bfnum,regtype,sigma)
+    else:
+        likeli = lambda x:-likelihood_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                      bonarr,bonseqsta,bonlocsta,bonlocend,x,seqnum,K,ufnum,bfnum,regtype,sigma)
+    likelihood_deriv = lambda x:-gradient_likelihood(x)
+    theta,fobj,dtemp = optimize.fmin_l_bfgs_b(likeli,theta, 
+            fprime=likelihood_deriv , disp=1, factr=1e12)
+
+    with open("ubobx", 'rb') as f:
+        uobxs,bobxs = pickle.load(f)
+    saveModel(bfnum,ufnum,tplist,obydic,uobxs,bobxs,theta,modelfile)
+    print "Training finished in ", time.time() - start_time, "seconds. \n "
+
+def train_simple(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
     import time 
     start_time = time.time()
     if not os.path.isfile(tpltfile):
@@ -696,21 +1097,22 @@ def train(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
     
     from scipy import optimize
     if mp==1:  # using multi processing
-        theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
-        print "theta OK", time.time() - start_time, "seconds. \n "
+        theta=random_param(ufnum,bfnum)
+        #theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
+        #print "theta OK", time.time() - start_time, "seconds. \n "
         #theta = numpy.ctypeslib.as_array(theta.get_obj())
         #theta = theta.reshape(ufnum+bfnum)
-        manager=multiprocessing.Manager()
-        ns=manager.Namespace()
-        ns.uon=uon
-        print "uon OK", time.time() - start_time, "seconds. \n "
-        ns.bon=bon
-        print "bon OK" , time.time() - start_time, "seconds. \n "
-        alens = multiprocessing.Array('i', seqnum)
-        for i in range(len(seqlens)):
-            alens[i]=seqlens[i]
-        print "alens OK", time.time() - start_time, "seconds. \n "
-        likeli = lambda x:-likelihood_mp(alens,fss,x,seqnum,K,ufnum,bfnum,regtype,sigma,ns)
+        #manager=multiprocessing.Manager()
+        #ns=manager.Namespace()
+        #ns.uon=uon
+        #print "uon OK", time.time() - start_time, "seconds. \n "
+        #ns.bon=bon
+        #print "bon OK" , time.time() - start_time, "seconds. \n "
+        #alens = multiprocessing.Array('i', seqnum)
+        #for i in range(len(seqlens)):
+        #    alens[i]=seqlens[i]
+        #print "alens OK", time.time() - start_time, "seconds. \n "
+        likeli = lambda x:-likelihood_mp_simple(seqlens,fss,uon,bon,x,seqnum,K,ufnum,bfnum,regtype,sigma)
     else:
         theta=random_param(ufnum,bfnum)
         likeli = lambda x:-likelihood(seqlens,fss,uon,bon,x,seqnum,K,ufnum,bfnum,regtype,sigma)
@@ -724,15 +1126,15 @@ def train(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
 def main():
     #checkCrfDev("train.txt","template.txt") 
     #checkCrfDev("train2.txt","template.txt") 
-    #checkCrfDev("train1.txt","template.txt") 
+    #checkCrfDev_sa("..\\train1.txt","..\\template.txt",mp=1) 
     #checkCrfDev("trainexample2.txt","template.txt")
-    #checkCrfDev("trainsimple.data","templatesimple.txt")
-    #train("train1.txt","template.txt","model",mp=0)
+    #checkCrfDev_sa("trainsimple.data","templatesimple.txt",mp=1)
+    train("..\\train1.txt","..\\template.txt","model",mp=1)
     #train("train1.txt","template.txt","model",mp=1)
     #train("datas\\4.msr_training.data","templatechunk","model")
-    #rain("train2.txt","template.txt","model",mp=1)
+    #train_sa("..\\train2.txt","..\\template.txt","model",mp=1)
     #train("datas\\train.txt","templatechunk","model")
-    train("trainsimple.data","templatesimple.txt","model")
+    #train_sa("trainsimple.data","templatesimple.txt","model")
     #train("tr1.utf8.txt","templatesimple.txt","model")
     
     #crfpredict("train2.txt","model","res.txt")
