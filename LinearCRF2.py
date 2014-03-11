@@ -185,6 +185,55 @@ def calObservexOn(tplist,texts,uobxs,bobxs,seqnum):
         uon.append(sequon);bon.append(seqbon)
     return uon,bon
 
+def calObservexOnLoc(uon,bon,seqnum):
+    '''speed up the feature calculation (Mulitprocessing)
+      calculate the on feature list and location ''' 
+    ulen=0 ; loclen=0
+    for a in uon:
+        loclen+=len(a)
+        for b in a:
+            ulen+=len(b)
+    #ulen = sum[(len(b)) for b in a for a in uon]
+    uonarr=numpy.zeros((ulen),dtype=numpy.int)
+    uonseqsta=numpy.zeros((seqnum),dtype=numpy.int)
+    uonlocsta=numpy.zeros((loclen),dtype=numpy.int)
+    uonlocend=numpy.zeros((loclen),dtype=numpy.int)
+    uid=0 ; seqi = 0 ; loci=0
+    for seq in uon:  # for each traning sequence.
+        uonseqsta[seqi]=loci
+        for loco in seq:
+            uonlocsta[loci]=uid
+            for aon in loco:
+                uonarr[uid]=aon
+                uid+=1
+            uonlocend[loci]=uid
+            loci+=1
+        seqi+=1
+        
+    blen=0 ; loclen=0
+    for a in bon:
+        loclen+=len(a)
+        for b in a:
+            blen+=len(b)
+    #ulen = sum[(len(b)) for b in a for a in uon]
+    bonarr=numpy.zeros((ulen),dtype=numpy.int)
+    bonseqsta=numpy.zeros((seqnum),dtype=numpy.int)
+    bonlocsta=numpy.zeros((loclen),dtype=numpy.int)
+    bonlocend=numpy.zeros((loclen),dtype=numpy.int)
+    bid=0 ; seqi = 0 ; loci=0
+    for seq in bon:  # for each traning sequence.
+        bonseqsta[seqi]=loci
+        for loco in seq:
+            bonlocsta[loci]=bid
+            for aon in loco:
+                bonarr[bid]=aon
+                bid+=1
+            bonlocend[loci]=bid
+            loci+=1
+        seqi+=1
+    #print len(uonlocsta)
+    return uonarr,uonseqsta,uonlocsta,uonlocend, bonarr,bonseqsta,bonlocsta,bonlocend
+
 
 def calFSS(texts,oys,uon,bon,ufnum,bfnum,seqnum,K,y0):
     fss=numpy.zeros((ufnum+bfnum))
@@ -251,6 +300,27 @@ def logMarray(seqlen,auon,abon,K, thetau,thetab):
         for ao in auon[li]:
             fv+=thetau[ao:ao+K][:,numpy.newaxis]
         for ao in abon[li]:
+            fv+=thetab[ao:ao+K*K].reshape((K,K))
+        mlist.append(fv)
+    
+    for i in range(0,K):  # set the energe function for ~y(0) to be -inf.
+        mlist[0][i][1:]= - float("inf")
+    #print "mlist:",mlist
+    return mlist      
+
+def logM_sa(seqlen,seqid,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,K, thetau,thetab):
+    ''' logMlist (n, K, K ) --> (sequence length, Yt, Yt-1)'''
+    mlist=[]
+    iloc = uonseqsta[seqid]
+    ilocb = bonseqsta[seqid]
+    for li in range(seqlen):
+        fv = numpy.zeros((K,K))
+        for i in range(uonlocsta[iloc+li],uonlocend[iloc+li]):
+            ao=uonarr[i]
+            fv+=thetau[ao:ao+K][:,numpy.newaxis]
+        for i in range(bonlocsta[ilocb+li],bonlocend[ilocb+li]):
+            ao=bonarr[i]
             fv+=thetab[ao:ao+K*K].reshape((K,K))
         mlist.append(fv)
     
@@ -384,6 +454,44 @@ def likelihood_multithread_O(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum):   
         subprocesses.pop().join()
     return likelihood - regularity(theta)
 
+
+def likelihood_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,theta,seqnum,K,ufnum,bfnum,regtype,sigma):
+    global _gradient
+    grad = numpy.array(fss,copy=True)  # data distribuition
+    gradb=grad[0:bfnum]
+    gradu=grad[bfnum:]
+    thetab=theta[0:bfnum]
+    thetau=theta[bfnum:]
+    likelihood = numpy.dot(fss,theta)
+    for si in range(seqnum):
+        logMlist = logM_sa(seqlens[si],si,uonarr,uonseqsta,uonlocsta,uonlocend,
+                                bonarr,bonseqsta,bonlocsta,bonlocend,K,thetau,thetab)
+        logalphas = logAlphas(logMlist)
+        logbetas = logBetas(logMlist)
+        logZ = logsumexp(logalphas[-1])
+        likelihood -= logZ
+        expect = numpy.zeros((K,K))
+        for i in range(len(logMlist)):
+            if i == 0:
+                expect = numpy.exp(logMlist[0] + logbetas[i][:,numpy.newaxis] - logZ)
+            elif i < len(logMlist) :
+                expect = numpy.exp(logMlist[i] + logalphas[i-1][numpy.newaxis,: ] + logbetas[i][:,numpy.newaxis] - logZ)
+            #print "expect t:",i, "expect: ", expect
+            p_yi=numpy.sum(expect,axis=1)
+            # minus the parameter distribuition
+            iloc = uonseqsta[si]
+            for it in range(uonlocsta[iloc+i],uonlocend[iloc+i]):            
+                ao=uonarr[it]
+                gradu[ao:ao+K] -= p_yi
+                
+            iloc = bonseqsta[si]    
+            for it in range(bonlocsta[iloc+i],bonlocend[iloc+i]):            
+                ao=bonarr[it]
+                gradb[ao:ao+K*K] -= expect.reshape((K*K))
+    grad -= regularity_deriv(theta,regtype,sigma)
+    _gradient = grad
+    return likelihood - regularity(theta,regtype,sigma)
 
 #def likelihood_mp(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma):
 def likelihood_mp(seqlens,fss,theta,seqnum,K,ufnum,bfnum,regtype,sigma,ns):
@@ -542,6 +650,53 @@ def checkCrfDev(datafile,tpltfile):
         print "dev:",dev[i],"dev numeric~:",devest, str(datetime.datetime.now())[10:19]
         theta[i]=theta[i]-delta  # reverse to original    
 
+def checkCrfDev_sa(datafile,tpltfile):
+    '''Check if the Derivative calculation is correct.
+    Don't call this function if your model has millions of features. 
+    Otherwise it will run forever...      '''
+    if not os.path.isfile(tpltfile):
+        print "Can't find the template file!"
+        return -1
+    tplist=readTemplate(tpltfile)    
+    
+    if not os.path.isfile(datafile):
+        print "Data file doesn't exist!"
+        return -1
+    texts,seqlens,oys,seqnum,K,obydic,y2label=readData(datafile)
+    
+    uobxs,bobxs,ufnum,bfnum=processFeatures(tplist,texts,seqnum,K)
+    fnum=ufnum+bfnum
+   
+    uon,bon = calObservexOn(tplist,texts,uobxs,bobxs,seqnum)
+    uonarr,uonseqsta,uonlocsta,uonlocend,bonarr,bonseqsta,bonlocsta,bonlocend = calObservexOnLoc(uon,bon,seqnum)
+    
+    y0=0
+    regtype=2 ;  sigma=1.0
+    fss=calFSS(texts,oys,uon,bon,ufnum,bfnum,seqnum,K,y0)
+    print "Linear CRF in Python.. ver 0.1 "
+    print "B features:",bfnum,"U features:",ufnum, "total num:",fnum
+    print "training sequence number:",seqnum
+
+    theta=random_param(ufnum,bfnum)
+    #theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
+    #theta = numpy.ctypeslib.as_array(theta.get_obj())
+    #theta = theta.reshape(ufnum+bfnum)
+    #assert ns.theta is theta
+    delta=0.0001
+    for i in range(fnum):
+        ta=likelihood_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                      bonarr,bonseqsta,bonlocsta,bonlocend,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        dev=gradient_likelihood(theta)
+        #dev=gradient_likelihood_standalone(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        #dev = grad
+        theta[i]=theta[i]+delta
+        #tb=likelihood(seqlens,fss,uon,bon,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        tb=likelihood_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                      bonarr,bonseqsta,bonlocsta,bonlocend,theta,seqnum,K,ufnum,bfnum,regtype,sigma)
+        devest=(tb-ta)/delta
+        print "dev:",dev[i],"dev numeric~:",devest, str(datetime.datetime.now())[10:19]
+        theta[i]=theta[i]-delta  # reverse to original    
+
 def saveModel(bfnum,ufnum,tlist,obydic,uobxs,bobxs,theta,modelfile):
     import cPickle as pickle
     with open(modelfile, 'wb') as f:
@@ -659,7 +814,6 @@ def train(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
         return -1
     tplist=readTemplate(tpltfile)    
     #print tplist
-    
     if not os.path.isfile(datafile):
         print "Data file doesn't exist!"
         return -1
@@ -721,18 +875,87 @@ def train(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
     saveModel(bfnum,ufnum,tplist,obydic,uobxs,bobxs,theta,modelfile)
     print "Training finished in ", time.time() - start_time, "seconds. \n "
 
+def train_sa(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
+    import time 
+    start_time = time.time()
+    if not os.path.isfile(tpltfile):
+        print "Can't find the template file!"
+        return -1
+    tplist=readTemplate(tpltfile)    
+    #print tplist
+    if not os.path.isfile(datafile):
+        print "Data file doesn't exist!"
+        return -1
+    texts,seqlens,oys,seqnum,K,obydic,y2label=readData(datafile)
+    #print seqlens 
+    
+    uobxs,bobxs,ufnum,bfnum=processFeatures(tplist,texts,seqnum,K)
+    fnum=ufnum+bfnum
+    print "Linear CRF in Python.. ver 0.1 "
+    print "B features:",bfnum,"U features:",ufnum, "total num:",fnum
+    print "training sequence number:",seqnum
+    print "start to calculate ON feature.  ", time.time() - start_time, "seconds. \n "
+    uon,bon = calObservexOn(tplist,texts,uobxs,bobxs,seqnum)
+    
+    print "start to calculate data distribuition. ", time.time() - start_time, "seconds. \n "    
+    y0=0
+    fss=calFSS(texts,oys,uon,bon,ufnum,bfnum,seqnum,K,y0)
+    del texts    
+    del oys
+
+    print "start to translate ON Feature list to Array.  ", time.time() - start_time, "seconds. \n "
+    uonarr,uonseqsta,uonlocsta,uonlocend,bonarr,bonseqsta,bonlocsta,bonlocend = calObservexOnLoc(uon,bon,seqnum)
+    #print  "ubon size:", sys.getsizeof(uon)
+    #print  "uobxs size:", sys.getsizeof(uobxs)
+    #print  "texts size:", sys.getsizeof(texts)
+    del uobxs
+    del bobxs
+    del uon
+    del bon
+    
+#    import cPickle as pickle
+#    with open("dump", 'wb') as f:
+#        pickle.dump([uon], f)
+        
+    print "start to learn distribuition. ", time.time() - start_time, "seconds. \n " 
+
+    #return
+    
+    from scipy import optimize
+    if mp==1:  # using multi processing
+        theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
+        print "theta OK", time.time() - start_time, "seconds. \n "
+        #theta = numpy.ctypeslib.as_array(theta.get_obj())
+        #theta = theta.reshape(ufnum+bfnum)
+        alens = multiprocessing.Array('i', seqnum)
+        for i in range(len(seqlens)):
+            alens[i]=seqlens[i]
+        print "alens OK", time.time() - start_time, "seconds. \n "
+        likeli = lambda x:-likelihood_mp(alens,fss,x,seqnum,K,ufnum,bfnum,regtype,sigma,ns)
+    else:
+        theta=random_param(ufnum,bfnum)
+        likeli = lambda x:-likelihood_sa(seqlens,fss,uonarr,uonseqsta,uonlocsta,uonlocend,
+                      bonarr,bonseqsta,bonlocsta,bonlocend,x,seqnum,K,ufnum,bfnum,regtype,sigma)
+    likelihood_deriv = lambda x:-gradient_likelihood(x)
+    theta,fobj,dtemp = optimize.fmin_l_bfgs_b(likeli,theta, 
+            fprime=likelihood_deriv , disp=1, factr=1e12)
+
+    #saveModel(bfnum,ufnum,tplist,obydic,uobxs,bobxs,theta,modelfile)
+    print "Training finished in ", time.time() - start_time, "seconds. \n "
+
+
 def main():
     #checkCrfDev("train.txt","template.txt") 
     #checkCrfDev("train2.txt","template.txt") 
-    #checkCrfDev("train1.txt","template.txt") 
+    #checkCrfDev_sa("train1.txt","template.txt") 
     #checkCrfDev("trainexample2.txt","template.txt")
-    #checkCrfDev("trainsimple.data","templatesimple.txt")
+    #checkCrfDev_sa("trainsimple.data","templatesimple.txt")
     #train("train1.txt","template.txt","model",mp=0)
     #train("train1.txt","template.txt","model",mp=1)
     #train("datas\\4.msr_training.data","templatechunk","model")
-    #rain("train2.txt","template.txt","model",mp=1)
+    train("train2.txt","template.txt","model",mp=0)
     #train("datas\\train.txt","templatechunk","model")
-    train("trainsimple.data","templatesimple.txt","model")
+    #train("trainsimple.data","templatesimple.txt","model")
     #train("tr1.utf8.txt","templatesimple.txt","model")
     
     #crfpredict("train2.txt","model","res.txt")
