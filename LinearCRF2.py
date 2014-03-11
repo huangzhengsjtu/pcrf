@@ -8,7 +8,7 @@ Linear CRF in Python
 
 License (BSD)
 ==============
-Copyright (c) 2013, Huang,Zheng. huang-zheng@sjtu.edu.cn
+Copyright (c) 2013, Huang,Zheng.  huang-zheng@sjtu.edu.cn
 All rights reserved.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
@@ -140,24 +140,40 @@ def expandOBX(texts,seqid,locid,tp):  # expend the observation at locid for sequ
     return strt       
 
     
-def processFeatures(tplist,texts,seqnum,K):
+def processFeatures(tplist,texts,seqnum,K,fd=1):
     uobxs =  dict(); bobxs=dict() ; 
-    ufnum=0;bfnum=0
+    '''add feature reduction here'''
     for ti,tp in enumerate(tplist):  # for each template line
         for sid in range(seqnum):  # for each traning sequence.
             for lid in range(len(texts[sid])):
                 obx=expandOBX(texts,sid,lid,tp)
-                #skey = str(ti)+":"+str(sid)+":"+str(lid)
-                #oball[skey]=obx
                 if obx[0]=="B":
                     if bobxs.has_key(obx)==False:
-                        bobxs[obx]=bfnum
-                        bfnum+=K*K
+                        bobxs[obx]=1
+                    else:
+                        tval= bobxs[obx]
+                        bobxs[obx]= tval+1
+                        
                 if obx[0]=="U":
                     if uobxs.has_key(obx)==False:
-                        uobxs[obx]=ufnum
-                        ufnum+=K
-    '''add feature reduction here'''
+                        uobxs[obx]=1
+                    else:
+                        tval= uobxs[obx]
+                        uobxs[obx]= tval+1
+                        
+    if fd>=2:  # need to remove ub frequency less than fd
+        uobxnew = { k : v for k,v in uobxs.iteritems() if v >= fd }
+        bobxnew = { k : v for k,v in bobxs.iteritems() if v >= fd }
+        del uobxs; del bobxs;
+        uobxs,bobxs=uobxnew,bobxnew
+    
+    ufnum, bfnum = 0 , 0                    
+    for obx in bobxs.keys():
+        bobxs[obx]=bfnum
+        bfnum+=K*K
+    for obx in uobxs.keys():
+        uobxs[obx]=ufnum
+        ufnum+=K
     return uobxs,bobxs,ufnum,bfnum
 
 def calObservexOn(tplist,texts,uobxs,bobxs,seqnum):
@@ -982,7 +998,7 @@ def crfpredict(datafile,modelfile,resfile=""):
     outputFile(texts,oys,maxys,y2label,resfile)
     print "Test finished in ", time.time() - start_time, "seconds. \n "
 
-def train(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
+def train(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0,fd=1.0):
     import time 
     import cPickle as pickle
 
@@ -998,12 +1014,15 @@ def train(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
     texts,seqlens,oys,seqnum,K,obydic,y2label=readData(datafile)
     #print seqlens 
     
-    uobxs,bobxs,ufnum,bfnum=processFeatures(tplist,texts,seqnum,K)
+    uobxs,bobxs,ufnum,bfnum=processFeatures(tplist,texts,seqnum,K, fd=fd)
     fnum=ufnum+bfnum
     print "Linear CRF in Python.. ver 0.1 "
     print "B features:",bfnum,"U features:",ufnum, "total num:",fnum
     print "training sequence number:",seqnum
     print "start to calculate ON feature.  elapsed time:", time.time() - start_time, "seconds. \n "
+    if fnum==0:
+        print "No Parameters to Learn. "
+        return
     uon,bon = calObservexOn(tplist,texts,uobxs,bobxs,seqnum)
     with open("ubobx", 'wb') as f:
         pickle.dump([uobxs,bobxs], f)
@@ -1098,20 +1117,6 @@ def train_simple(datafile,tpltfile,modelfile,mp=1,regtype=2,sigma=1.0):
     from scipy import optimize
     if mp==1:  # using multi processing
         theta=random_param(ufnum,bfnum)
-        #theta = multiprocessing.Array(ctypes.c_double, ufnum+bfnum)
-        #print "theta OK", time.time() - start_time, "seconds. \n "
-        #theta = numpy.ctypeslib.as_array(theta.get_obj())
-        #theta = theta.reshape(ufnum+bfnum)
-        #manager=multiprocessing.Manager()
-        #ns=manager.Namespace()
-        #ns.uon=uon
-        #print "uon OK", time.time() - start_time, "seconds. \n "
-        #ns.bon=bon
-        #print "bon OK" , time.time() - start_time, "seconds. \n "
-        #alens = multiprocessing.Array('i', seqnum)
-        #for i in range(len(seqlens)):
-        #    alens[i]=seqlens[i]
-        #print "alens OK", time.time() - start_time, "seconds. \n "
         likeli = lambda x:-likelihood_mp_simple(seqlens,fss,uon,bon,x,seqnum,K,ufnum,bfnum,regtype,sigma)
     else:
         theta=random_param(ufnum,bfnum)
@@ -1129,12 +1134,12 @@ def main():
     #checkCrfDev_sa("..\\train1.txt","..\\template.txt",mp=1) 
     #checkCrfDev("trainexample2.txt","template.txt")
     #checkCrfDev_sa("trainsimple.data","templatesimple.txt",mp=1)
-    train("..\\train1.txt","..\\template.txt","model",mp=1)
+    #train("..\\train1.txt","..\\template.txt","model",mp=0,fd=1)
     #train("train1.txt","template.txt","model",mp=1)
     #train("datas\\4.msr_training.data","templatechunk","model")
-    #train_sa("..\\train2.txt","..\\template.txt","model",mp=1)
+    #train("..\\train2.txt","..\\template.txt","model",mp=1,fd=2)
     #train("datas\\train.txt","templatechunk","model")
-    #train_sa("trainsimple.data","templatesimple.txt","model")
+    train("trainsimple.data","templatesimple.txt","model",mp=0)
     #train("tr1.utf8.txt","templatesimple.txt","model")
     
     #crfpredict("train2.txt","model","res.txt")

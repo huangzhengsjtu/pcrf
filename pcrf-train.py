@@ -28,13 +28,16 @@ if __name__ ==  '__main__':
     parser.add_argument("-m", "--multiproc", type=int, 
                         default=1, choices=[0,1],
                         help="multiprocessing: 1:use multiprocessing; 0:only single core.")
+    parser.add_argument("-f", "--fd", type=int, 
+                        default=1, 
+                        help="feature reduction: the number of observed x under this value is ignored.")
     
     args = parser.parse_args()
 
     #print args.sigma
 
     LinearCRF2.train(args.datafile,args.templatefile,args.modelfile,
-        regtype=args.regularity,sigma=args.sigma,mp=args.multiproc)
+        regtype=args.regularity,sigma=args.sigma,mp=args.multiproc, fd=args.fd)
    
 
     
